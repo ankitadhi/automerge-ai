@@ -1,4 +1,5 @@
-# predictor/services.py - CORRECTED FOR AutoMerge AI
+# predictor/services.py - FINAL (RAW CONFLICT, NO PROMPT)
+
 import torch
 import logging
 from transformers import T5ForConditionalGeneration, RobertaTokenizer
@@ -8,9 +9,14 @@ logger = logging.getLogger(__name__)
 
 class MergeResolverModel:
     """
-    Service class for the AutoMerge AI CodeT5 model
-    Based on the README: Uses T5ForConditionalGeneration and RobertaTokenizer
+    AutoMerge AI Service (FINAL VERSION)
+
+    ✔ Uses RAW Git conflict markers directly
+    ✔ No prompt (matches training format)
+    ✔ Removes input echo issue
+    ✔ Cleans leftover markers
     """
+
     _instance = None
     _model = None
     _tokenizer = None
@@ -23,99 +29,74 @@ class MergeResolverModel:
         return cls._instance
 
     def initialize_model(self):
-        """Initialize the PyTorch CodeT5 model and tokenizer"""
+        """Load model and tokenizer"""
         try:
-            logger.info(
-                "Loading AutoMerge AI model: ankit-ml11/automerge-codet5")
+            logger.info("Loading AutoMerge AI model...")
 
-            # Use GPU if available
+            # Device setup
             self._device = torch.device(
-                'cuda' if torch.cuda.is_available() else 'cpu')
+                "cuda" if torch.cuda.is_available() else "cpu"
+            )
             logger.info(f"Using device: {self._device}")
 
-            # CORRECT: Use T5ForConditionalGeneration and RobertaTokenizer per README
+            # Load tokenizer + model
             self._tokenizer = RobertaTokenizer.from_pretrained(
-                "ankit-ml11/automerge-codet5")
+                "ankit-ml11/codet5p-220_conflict_resolver"
+            )
             self._model = T5ForConditionalGeneration.from_pretrained(
-                "ankit-ml11/automerge-codet5")
+                "ankit-ml11/codet5p-220_conflict_resolver"
+            )
 
-            # Move model to device
-            self._model = self._model.to(self._device)
+            self._model.to(self._device)
             self._model.eval()
 
-            logger.info("AutoMerge AI model loaded successfully!")
+            logger.info("✅ Model loaded successfully!")
 
         except Exception as e:
-            logger.error(f"Error loading model: {str(e)}")
+            logger.error(f"❌ Model loading failed: {str(e)}")
             raise
 
-    def parse_git_conflict(self, conflict_text: str):
+    def clean_output(self, text: str) -> str:
         """
-        Parse standard Git conflict markers into base, ours, theirs.
-        According to README, model needs three separate code versions.
+        Remove unwanted artifacts from model output
         """
-        lines = conflict_text.split('\n')
-        ours_lines, base_lines, theirs_lines = [], [], []
-        section = None
+        markers = ["<<<<<<<", "=======", ">>>>>>>", "|||||||"]
 
-        for line in lines:
-            if line.startswith('<<<<<<<'):
-                section = 'ours'
-            elif line.startswith('|||||||'):
-                section = 'base'
-            elif line.startswith('======='):
-                section = 'theirs'
-            elif line.startswith('>>>>>>>'):
-                section = None
-            elif section == 'ours':
-                ours_lines.append(line)
-            elif section == 'base':
-                base_lines.append(line)
-            elif section == 'theirs':
-                theirs_lines.append(line)
+        for marker in markers:
+            text = text.replace(marker, "")
 
-        # Join lines and handle missing sections
-        base_code = '\n'.join(
-            base_lines) if base_lines else '\n'.join(ours_lines)
-        ours_code = '\n'.join(ours_lines)
-        theirs_code = '\n'.join(theirs_lines)
+        return text.strip()
 
-        return {
-            'base': base_code,
-            'ours': ours_code,
-            'theirs': theirs_code
-        }
-
-    def resolve_merge_conflict(self, conflict_text: str, language: str = "python", max_length: int = 512) -> str:
+    def remove_input_echo(self, output: str, input_text: str) -> str:
         """
-        Resolve a merge conflict using the AutoMerge AI model.
-        
+        Remove copied input from model output
+        """
+        if input_text in output:
+            output = output.replace(input_text, "")
+
+        return output.strip()
+
+    def resolve_merge_conflict(
+        self,
+        conflict_text: str,
+        language: str = "python",
+        max_length: int = 512
+    ) -> str:
+        """
+        Resolve merge conflict using RAW input only
+
         Args:
-            conflict_text: Git conflict text with markers
-            language: Programming language (python, javascript, java, etc.)
-            max_length: Maximum length of generated output
-        
+            conflict_text: Raw Git conflict text
+            language: (unused but kept for API compatibility)
+            max_length: max output tokens
+
         Returns:
-            Resolved code
+            Clean resolved code
         """
         try:
-            # 1. Parse the Git conflict into three parts
-            parsed = self.parse_git_conflict(conflict_text)
+            # 🔥 CRITICAL: NO PROMPT (matches training)
+            input_text = conflict_text
 
-            # 2. Format input EXACTLY as shown in README
-            input_text = f"""Resolve the following merge conflict in {language}.
-
-BASE VERSION:
-{parsed['base']}
-
-OURS VERSION:
-{parsed['ours']}
-
-THEIRS VERSION:
-{parsed['theirs']}
-"""
-
-            # 3. Tokenize with RobertaTokenizer
             inputs = self._tokenizer(
                 input_text,
                 return_tensors="pt",
@@ -124,48 +105,59 @@ THEIRS VERSION:
                 padding=True
             ).to(self._device)
 
-            # 4. Generate resolution
             with torch.no_grad():
                 outputs = self._model.generate(
                     **inputs,
                     max_length=max_length,
                     num_beams=5,
-                    early_stopping=True,
-                    no_repeat_ngram_size=3
+                    early_stopping=True
                 )
 
-            # 5. Decode and return
             resolved_code = self._tokenizer.decode(
-                outputs[0], skip_special_tokens=True)
+                outputs[0],
+                skip_special_tokens=True
+            )
+
+            # 🔥 FIX 1: Remove echoed input
+            resolved_code = self.remove_input_echo(
+                resolved_code,
+                input_text
+            )
+
+            # 🔥 FIX 2: Clean leftover markers
+            resolved_code = self.clean_output(resolved_code)
 
             return resolved_code
 
         except Exception as e:
-            logger.error(f"Error during inference: {str(e)}")
+            logger.error(f"❌ Inference error: {str(e)}")
             raise
 
-    def batch_resolve(self, conflict_texts: list, language: str = "python", max_length: int = 512) -> list:
+    def batch_resolve(
+        self,
+        conflict_texts: list,
+        language: str = "python",
+        max_length: int = 512
+    ) -> list:
         """
-        Resolve multiple merge conflicts
-        
-        Args:
-            conflict_texts: List of Git conflict texts
-            language: Programming language
-            max_length: Maximum length of generated output
-        
-        Returns:
-            List of resolution results
+        Resolve multiple conflicts
         """
         results = []
+
         for conflict_text in conflict_texts:
             try:
                 resolved = self.resolve_merge_conflict(
-                    conflict_text, language, max_length)
+                    conflict_text,
+                    language,
+                    max_length
+                )
+
                 results.append({
                     "input": conflict_text,
                     "resolved": resolved,
                     "status": "success"
                 })
+
             except Exception as e:
                 results.append({
                     "input": conflict_text,
@@ -177,5 +169,5 @@ THEIRS VERSION:
         return results
 
 
-# Global instance - KEEP THIS
+# ✅ Global instance (DO NOT REMOVE)
 merge_resolver = MergeResolverModel()
